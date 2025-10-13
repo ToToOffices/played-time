@@ -1,0 +1,142 @@
+/*
+ * Plugin: Top15 cu salvare persistentă (nVault)
+ * Server: Furien.lastcs.ro
+ * Autor: ChatGPT
+ */
+
+#include <amxmodx>
+#include <nvault>
+
+#define MAX_NAME_LENGTH 32
+#define MAX_PLAYERS 32
+#define MAX_TOP 15
+
+new gKills[MAX_PLAYERS+1], gDeaths[MAX_PLAYERS+1], gHS[MAX_PLAYERS+1]
+new gVault
+
+public plugin_init() {
+    register_plugin("Top15 cu Salvare", "1.0", "ChatGPT")
+    register_clcmd("say /top15", "show_top15")
+    register_event("DeathMsg", "event_death", "a")
+
+    gVault = nvault_open("top15_stats")
+    if(gVault == INVALID_HANDLE) set_fail_state("Nu s-a putut deschide nVault!")
+}
+
+public plugin_end() {
+    nvault_close(gVault)
+}
+
+public client_putinserver(id) {
+    load_stats(id)
+}
+
+public client_disconnect(id) {
+    save_stats(id)
+}
+
+public event_death() {
+    new attacker = read_data(1)
+    new victim = read_data(2)
+    new hs = read_data(3)
+
+    if(attacker == victim || attacker == 0) return
+
+    gKills[attacker]++
+    if(hs)
+        gHS[attacker]++
+
+    gDeaths[victim]++
+}
+
+save_stats(id) {
+    if(!is_user_connected(id)) return
+
+    new name[MAX_NAME_LENGTH]
+    get_user_name(id, name, charsmax(name))
+
+    new key[64], data[64]
+    formatex(key, charsmax(key), "%s", name)
+    formatex(data, charsmax(data), "%d %d %d", gKills[id], gDeaths[id], gHS[id])
+
+    nvault_set(gVault, key, data)
+}
+
+load_stats(id) {
+    new name[MAX_NAME_LENGTH]
+    get_user_name(id, name, charsmax(name))
+
+    new key[64], data[64]
+    formatex(key, charsmax(key), "%s", name)
+
+    if(nvault_get(gVault, key, data, charsmax(data)) > 0) {
+        parse(data, gKills[id], gDeaths[id], gHS[id])
+    }
+}
+
+// Structură simplă pentru top
+enum PlayerData {
+    Name[MAX_NAME_LENGTH],
+    Kills,
+    Deaths,
+    HS
+}
+
+public show_top15(id) {
+    new vaultkeys[1024], key[64], value[64], num, timestamp
+    new players[33][PlayerData], count
+
+    num = nvault_prune(gVault, 0, get_systime()) // trimite tot ce e salvat
+    nvault_getkeys(gVault, vaultkeys, charsmax(vaultkeys))
+
+    new pos = 0
+    while (vaultkeys[pos]) {
+        strtok(vaultkeys[pos], key, charsmax(key), pos, 63)
+        nvault_get(gVault, key, value, charsmax(value))
+
+        parse(value, players[count][Kills], players[count][Deaths], players[count][HS])
+        copy(players[count][Name], charsmax(players[][Name]), key)
+        count++
+
+        pos += strlen(key) + 1
+        if (count >= MAX_TOP) break
+    }
+
+    // Sortăm topul
+    SortCustom1D(players, count, "compare_players")
+
+    new menu = menu_create("\rTop 15 \y[Furien.lastcs.ro]", "menu_handler")
+    for(new i = 0; i < count && i < MAX_TOP; i++) {
+        new line[128]
+        if (i == 0)
+            formatex(line, charsmax(line), "\y1. \r%s \w– %dK | %dD | %dHS", players[i][Name], players[i][Kills], players[i][Deaths], players[i][HS])
+        else if (i == 1)
+            formatex(line, charsmax(line), "\y2. \r%s \w– %dK | %dD | %dHS", players[i][Name], players[i][Kills], players[i][Deaths], players[i][HS])
+        else if (i == 2)
+            formatex(line, charsmax(line), "\y3. \r%s \w– %dK | %dD | %dHS", players[i][Name], players[i][Kills], players[i][Deaths], players[i][HS])
+        else
+            formatex(line, charsmax(line), "\w%d. \r%s \w– %dK | %dD | %dHS", i+1, players[i][Name], players[i][Kills], players[i][Deaths], players[i][HS])
+
+        menu_additem(menu, line)
+    }
+
+    menu_display(id, menu)
+}
+
+public compare_players(elem1[], elem2[]) {
+    if (elem1[Kills] > elem2[Kills])
+        return -1
+    else if (elem1[Kills] < elem2[Kills])
+        return 1
+    else if (elem1[HS] > elem2[HS])
+        return -1
+    else if (elem1[HS] < elem2[HS])
+        return 1
+
+    return 0
+}
+
+public menu_handler(id, menu, item) {
+    menu_destroy(menu)
+    return PLUGIN_HANDLED
+}
