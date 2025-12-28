@@ -1,0 +1,117 @@
+
+HomeThe home of Counter-StrikeeXtream - Counter-Strike 1.6Discutii generalePluginuriAmxModX
+
+ 18 Dec 2025, 21:12
+
+//Descriere: Porneste un sunet cu suspans atunci cand un jucator ramane singur contra 2 sau mai multi inamici. Poti primi mesaj in chat/hud, depinde de setarea cvar-ului. Sunetul este de 0.6 MB, vi-l pun la download si pe acela. Va recomand fastdl.
+
+#include <amxmodx>
+#include <cstrike>
+#include <fakemeta>
+
+#define PLUGIN "Clutch Minister Pro Color"
+#define VERSION "3.0"
+#define AUTHOR "Gemini/AMXX"
+
+// Calea sunetului
+new const CLUTCH_SOUND[] = "misc/clutch_music.mp3";
+
+// Variabile
+new bool:g_isMusicPlaying[33];
+new bool:g_wantsMusic[33];
+new g_pCvarChatMessages; // Pointer pentru CVAR
+
+public plugin_init() {
+    register_plugin(PLUGIN, VERSION, AUTHOR);
+    
+    register_event("DeathMsg", "event_DeathMsg", "a");
+    register_event("HLTV", "event_NewRound", "a", "1=0", "2=0");
+    register_clcmd("say /clutch", "cmd_toggle_clutch");
+
+    // Creare CVAR: 1 = Activat (Default), 0 = Dezactivat
+    g_pCvarChatMessages = create_cvar("amx_clutch_chat_messages", "1");
+
+    for(new i = 1; i <= 32; i++) g_wantsMusic[i] = true;
+}
+
+public plugin_precache() {
+    static precache_path[64];
+    formatex(precache_path, charsmax(precache_path), "sound/%s", CLUTCH_SOUND);
+    precache_generic(precache_path); 
+}
+
+public client_putinserver(id) {
+    g_wantsMusic[id] = true;
+    g_isMusicPlaying[id] = false;
+}
+
+public cmd_toggle_clutch(id) {
+    g_wantsMusic[id] = !g_wantsMusic[id];
+    
+    // Mesaj colorat pentru jucător: !g = Verde, !n = Normal, !t = Culoarea echipei
+    client_print_color(id, print_team_default, "^4[Clutch]^1 Muzica a fost %s.", g_wantsMusic[id] ? "^3ACTIVATA" : "^2DEZACTIVATA");
+    
+    if (!g_wantsMusic[id] && g_isMusicPlaying[id]) {
+        client_cmd(id, "mp3 stop");
+        g_isMusicPlaying[id] = false;
+    }
+    return PLUGIN_HANDLED;
+}
+
+public event_NewRound() {
+    for (new i = 1; i <= 32; i++) {
+        if (g_isMusicPlaying[i]) {
+            client_cmd(i, "mp3 stop");
+            g_isMusicPlaying[i] = false;
+        }
+    }
+}
+
+public event_DeathMsg() {
+    set_task(0.5, "check_clutch");
+}
+
+public check_clutch() {
+    new ctCount, tCount;
+    new cts[32], ts[32];
+
+    get_players(cts, ctCount, "ae", "CT");
+    get_players(ts, tCount, "ae", "TERRORIST");
+
+    if (ctCount == 1 && tCount >= 2) {
+        activate_clutch(cts[0], tCount);
+    } 
+    else if (tCount == 1 && ctCount >= 2) {
+        activate_clutch(ts[0], ctCount);
+    }
+}
+
+activate_clutch(clutcher_id, enemies) {
+    new all_players[32], num, player;
+    get_players(all_players, num);
+
+    // Citim valoarea CVAR-ului
+    new bool:showChat = get_pcvar_num(g_pCvarChatMessages) != 0;
+
+    for (new i = 0; i < num; i++) {
+        player = all_players[i];
+
+        if (player == clutcher_id || (!is_user_alive(player) && pev(player, pev_iuser2) == clutcher_id)) {
+            
+            if (g_wantsMusic[player] && !g_isMusicPlaying[player]) {
+                g_isMusicPlaying[player] = true;
+                
+                // Mesaj colorat în chat (dacă CVAR-ul este activat)
+                if (showChat) {
+                    client_print_color(player, clutcher_id, "^4[Clutch]^1 Esti singur contra ^3%d^1 inamici!", enemies);
+                }
+
+                // Mesaj HUD
+                set_hudmessage(255, 200, 0, -1.0, 0.2, 0, 0.1, 4.0, 0.1, 0.1, -1);
+                show_hudmessage(player, "MOD CLUTCH: 1 vs %d", enemies);
+
+                client_cmd(player, "mp3 stop; mp3 play sound/%s", CLUTCH_SOUND);
+            }
+        }
+    }
+}
