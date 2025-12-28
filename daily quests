@@ -1,0 +1,471 @@
+#include <amxmodx>
+#include <amxmisc>
+#include <cstrike>
+#include <fun>
+#include <nvault>
+
+#define PLUGIN "Daily Quests & XP System"
+#define VERSION "4.0-STABLE"
+#define AUTHOR "Gemini"
+
+// --- CONFIGURARE ---
+#define RANKING_FILE "quest_rankings.ini" 
+#define MAX_DAILY_SLOTS 3
+
+// Enumerația Misiunilor
+enum {
+    Q_NONE = -1,
+    Q_KILL_3, Q_PLANT, Q_DEFUSE, Q_AWP_1, Q_USP_3, Q_GLOCK_3, 
+    Q_DEAGLE_3, Q_KILL_5, Q_HS_1, Q_HS_3, Q_RESCUE, 
+    Q_PROTECT_BOMB, Q_SUICIDE, Q_KNIFE_1, Q_FLASH_2, 
+    Q_HE_1, Q_SCOUT_1,
+    MAX_QUESTS
+}
+
+new const g_szQuestNames[MAX_QUESTS][] = {
+    "Omoara 3 inamici", "Planteaza bomba (T)", "Dezamorseaza bomba (CT)",
+    "Fa 1 kill cu AWP", "Omoara 3 jucatori cu USP", "Omoara 3 jucatori cu Glock",
+    "Omoara 3 jucatori cu Deagle", "Omoara 5 inamici", "Omoara 1 inamic cu Headshot",
+    "Omoara 3 inamici cu Headshot", "Salveaza un ostatic", "Protejeaza bomba pana explodeaza",
+    "Sinucide-te", "Ucide un inamic cu cutitul", "Orbeste 2 inamici cu Flash",
+    "Ucide un inamic cu HE", "Ucide un inamic cu Scout"
+};
+
+new const g_iQuestTarget[MAX_QUESTS] = {
+    3, 1, 1, 1, 3, 3, 3, 5, 1, 3, 1, 1, 1, 1, 2, 1, 1
+};
+
+// Variabile
+new g_vault_daily;
+new g_iDailyQuests[33][MAX_DAILY_SLOTS];
+new g_iDailyProgress[33][MAX_DAILY_SLOTS];
+new bool:g_bDailyCompleted[33][MAX_DAILY_SLOTS];
+new g_iTotalXP[33];
+new g_szPlayerName[33][32];
+new g_szAuthID[33][35];
+
+new p_CvarXPReward, p_CvarMoneyReward;
+new g_iBombPlanter = 0;
+new bool:g_bMapHasBomb = false;
+new bool:g_bMapHasHostage = false;
+
+public plugin_init() {
+    register_plugin(PLUGIN, VERSION, AUTHOR);
+
+    // Mesaj de confirmare in consola serverului
+    server_print("-----------------------------------------");
+    server_print("[QUEST] Pluginul Daily Quests v4.0 se incarca...");
+    server_print("-----------------------------------------");
+
+    p_CvarXPReward = register_cvar("amx_quest_xp_amount", "1");
+    p_CvarMoneyReward = register_cvar("amx_quest_money_amount", "300");
+
+    register_event("DeathMsg", "Event_DeathMsg", "a");
+    register_logevent("Event_BombPlanted", 3, "2=Planted_The_Bomb");
+    register_logevent("Event_BombDefused", 3, "2=Defused_The_Bomb");
+    register_logevent("Event_HostageRescued", 3, "2=Rescued_The_Hostage");
+    register_logevent("Event_RoundEnd", 2, "1=Round_End");
+    
+    register_clcmd("say /quest", "Cmd_ShowQuest");
+    register_clcmd("say /misiune", "Cmd_ShowQuest");
+    register_clcmd("say /questxp", "Cmd_ShowXP");
+    register_clcmd("say /topxp", "Cmd_ShowTopFile"); // Acum e comanda publica
+    
+    register_concmd("amx_reset_qxp", "Cmd_ResetXP", ADMIN_RCON);
+    register_concmd("amx_force_save", "Cmd_ForceSave", ADMIN_RCON, "Forteaza salvarea fisierului acum");
+
+    g_vault_daily = nvault_open("daily_quests_final");
+
+    if (g_vault_daily == INVALID_HANDLE) {
+        log_amx("[QUEST] EROARE GRAVA: Modulul nVault nu functioneaza!");
+    }
+
+    CheckMapType();
+    
+    // Fortam crearea fisierului la start
+    ForceCreateFile();
+}
+
+public plugin_end() {
+    SaveRankingsToFile();
+    if(g_vault_daily != INVALID_HANDLE)
+        nvault_close(g_vault_daily);
+}
+
+public client_putinserver(id) {
+    // Resetare variabile
+    for(new i=0; i<MAX_DAILY_SLOTS; i++) {
+        g_iDailyQuests[id][i] = Q_NONE;
+        g_iDailyProgress[id][i] = 0;
+        g_bDailyCompleted[id][i] = false;
+    }
+    g_iTotalXP[id] = 0;
+    
+    get_user_name(id, g_szPlayerName[id], 31);
+    get_user_authid(id, g_szAuthID[id], 34);
+
+    LoadDailyData(id);
+    LoadXPFromVault(id); // Luam XP din nVault
+}
+
+public client_disconnected(id) {
+    if(g_iBombPlanter == id) g_iBombPlanter = 0;
+    
+    SaveDailyData(id);
+    SaveXPToVault(id);
+    
+    // Daca jucatorul avea XP, actualizam fisierul
+    if(g_iTotalXP[id] > 0) {
+        SaveRankingsToFile();
+    }
+}
+
+// --- LOGICA QUESTURI ---
+public AssignDailyQuests(id) {
+    new iCount = 0, iAttempts = 0;
+    while(iCount < MAX_DAILY_SLOTS && iAttempts < 200) {
+        iAttempts++;
+        new iRandom = random_num(0, MAX_QUESTS - 1);
+        
+        if((iRandom == Q_PLANT || iRandom == Q_DEFUSE || iRandom == Q_PROTECT_BOMB) && !g_bMapHasBomb) continue;
+        if(iRandom == Q_RESCUE && !g_bMapHasHostage) continue;
+        
+        new bool:bDuplicate = false;
+        for(new k=0; k<iCount; k++) {
+            if(g_iDailyQuests[id][k] == iRandom) {
+                bDuplicate = true;
+                break;
+            }
+        }
+        if(bDuplicate) continue;
+        
+        g_iDailyQuests[id][iCount] = iRandom;
+        g_iDailyProgress[id][iCount] = 0;
+        g_bDailyCompleted[id][iCount] = false;
+        iCount++;
+    }
+}
+
+public CheckProgress(id, iQuestType, iAmount) {
+    if(!is_user_connected(id)) return;
+    for(new i=0; i<MAX_DAILY_SLOTS; i++) {
+        if(g_iDailyQuests[id][i] == iQuestType && !g_bDailyCompleted[id][i]) {
+            g_iDailyProgress[id][i] += iAmount;
+            if(g_iDailyProgress[id][i] >= g_iQuestTarget[iQuestType]) {
+                CompleteQuest(id, i);
+            }
+        }
+    }
+}
+
+public CompleteQuest(id, iSlot) {
+    g_bDailyCompleted[id][iSlot] = true;
+    new iXP = get_pcvar_num(p_CvarXPReward);
+    new iMoney = get_pcvar_num(p_CvarMoneyReward);
+    
+    g_iTotalXP[id] += iXP;
+    
+    new iCurrentMoney = cs_get_user_money(id);
+    if(iCurrentMoney < 16000) {
+        cs_set_user_money(id, (iCurrentMoney + iMoney > 16000) ? 16000 : iCurrentMoney + iMoney);
+    }
+
+    ChatColor(id, "^4[QUEST]^1 Ai terminat: ^3%s", g_szQuestNames[g_iDailyQuests[id][iSlot]]);
+    ChatColor(id, "^4[QUEST]^1 Recompensa: ^4+%d XP^1 si ^4$%d^1.", iXP, iMoney);
+    client_cmd(id, "spk events/tutor_msg");
+    
+    SaveDailyData(id);
+    SaveXPToVault(id);
+    SaveRankingsToFile(); // Salvam si in fisier cand face quest
+}
+
+// --- EVENTS ---
+public Event_DeathMsg() {
+    new killer = read_data(1);
+    new victim = read_data(2);
+    new headshot = read_data(3);
+    new szWeapon[24]; read_data(4, szWeapon, 23);
+
+    if(killer == victim || !is_user_connected(killer)) {
+        if(is_user_connected(victim)) CheckProgress(victim, Q_SUICIDE, 1);
+        return;
+    }
+    CheckProgress(killer, Q_KILL_3, 1);
+    CheckProgress(killer, Q_KILL_5, 1);
+    if(headshot) { 
+        CheckProgress(killer, Q_HS_1, 1); 
+        CheckProgress(killer, Q_HS_3, 1); 
+    }
+    
+    if(containi(szWeapon, "awp") != -1) CheckProgress(killer, Q_AWP_1, 1);
+    else if(containi(szWeapon, "usp") != -1) CheckProgress(killer, Q_USP_3, 1);
+    else if(containi(szWeapon, "glock") != -1) CheckProgress(killer, Q_GLOCK_3, 1);
+    else if(containi(szWeapon, "deagle") != -1) CheckProgress(killer, Q_DEAGLE_3, 1);
+    else if(containi(szWeapon, "knife") != -1) CheckProgress(killer, Q_KNIFE_1, 1);
+    else if(containi(szWeapon, "grenade") != -1) CheckProgress(killer, Q_HE_1, 1);
+    else if(containi(szWeapon, "scout") != -1) CheckProgress(killer, Q_SCOUT_1, 1);
+}
+
+public Event_BombPlanted() {
+    new loguser[80], name[32]; read_logargv(0, loguser, 79); parse_loguser(loguser, name, 31);
+    new id = get_user_index(name);
+    if(is_user_connected(id)) { CheckProgress(id, Q_PLANT, 1); g_iBombPlanter = id; }
+}
+
+public Event_BombDefused() {
+    new loguser[80], name[32]; read_logargv(0, loguser, 79); parse_loguser(loguser, name, 31);
+    new id = get_user_index(name);
+    if(is_user_connected(id)) { CheckProgress(id, Q_DEFUSE, 1); }
+    g_iBombPlanter = 0; 
+}
+
+public Event_HostageRescued() {
+    new loguser[80], name[32]; read_logargv(0, loguser, 79); parse_loguser(loguser, name, 31);
+    new id = get_user_index(name);
+    if(is_user_connected(id)) { CheckProgress(id, Q_RESCUE, 1); }
+}
+
+public Event_RoundEnd() {
+    if(read_data(1) == 1 && g_iBombPlanter != 0 && is_user_alive(g_iBombPlanter)) {
+        CheckProgress(g_iBombPlanter, Q_PROTECT_BOMB, 1);
+    }
+    g_iBombPlanter = 0;
+}
+
+// --- COMENZI ---
+public Cmd_ShowQuest(id) {
+    ChatColor(id, "^4--- MISIUNI ZILNICE ---");
+    for(new i=0; i<MAX_DAILY_SLOTS; i++) {
+        new iQ = g_iDailyQuests[id][i];
+        if(iQ == Q_NONE) continue;
+        new szStatus[16];
+        if(g_bDailyCompleted[id][i]) formatex(szStatus, 15, "^3[COMPLET]^1");
+        else formatex(szStatus, 15, "^4[%d/%d]^1", g_iDailyProgress[id][i], g_iQuestTarget[iQ]);
+        ChatColor(id, "%d. %s %s", i+1, g_szQuestNames[iQ], szStatus);
+    }
+    return PLUGIN_HANDLED;
+}
+
+public Cmd_ShowXP(id) {
+    ChatColor(id, "^4[XP]^1 XP-ul tau curent: ^3%d", g_iTotalXP[id]);
+    return PLUGIN_HANDLED;
+}
+
+public Cmd_ShowTopFile(id) {
+    new szFile[256];
+    get_configsdir(szFile, 255); add(szFile, 255, "/"); add(szFile, 255, RANKING_FILE);
+    
+    if(!file_exists(szFile)) {
+        ChatColor(id, "^4[QUEST]^1 Topul este momentan gol sau fisierul lipseste.");
+        return PLUGIN_HANDLED;
+    }
+    
+    // Afisam in consola clientului (pentru ca topul e lung)
+    client_print(id, print_console, "----- TOP XP QUESTS -----");
+    
+    new iFile = fopen(szFile, "rt");
+    if(iFile) {
+        new szBuffer[256], iCount = 0;
+        while(!feof(iFile) && iCount < 15) { // Aratam primii 15 in consola
+            fgets(iFile, szBuffer, 255);
+            if(szBuffer[0] == ';' || strlen(szBuffer) < 5) continue;
+            client_print(id, print_console, "%s", szBuffer);
+            iCount++;
+        }
+        fclose(iFile);
+    }
+    
+    ChatColor(id, "^4[QUEST]^1 Topul a fost afisat in consola ta (^3~^1).");
+    return PLUGIN_HANDLED;
+}
+
+public Cmd_ResetXP(id, level, cid) {
+    if(!cmd_access(id, level, cid, 1)) return PLUGIN_HANDLED;
+    
+    nvault_prune(g_vault_daily, 0, get_systime() + 1);
+
+    new szFile[256]; get_configsdir(szFile, 255); add(szFile, 255, "/"); add(szFile, 255, RANKING_FILE);
+    if(file_exists(szFile)) delete_file(szFile);
+    
+    // Recream fisierul gol
+    ForceCreateFile();
+
+    new players[32], num; get_players(players, num);
+    for(new i=0; i<num; i++) {
+        g_iTotalXP[players[i]] = 0;
+        SaveXPToVault(players[i]);
+    }
+    ChatColor(id, "^4[ADMIN]^1 Ai resetat cu succes XP-ul.");
+    return PLUGIN_HANDLED;
+}
+
+public Cmd_ForceSave(id, level, cid) {
+    if(!cmd_access(id, level, cid, 1)) return PLUGIN_HANDLED;
+    SaveRankingsToFile();
+    client_print(id, print_console, "[QUEST] Salvare fortata executata.");
+    return PLUGIN_HANDLED;
+}
+
+// --- SALVARE SIGURA (nVault + File) ---
+
+public SaveXPToVault(id) {
+    if(g_vault_daily == INVALID_HANDLE) return;
+    new szKey[64], szData[16];
+    formatex(szKey, 63, "XP_%s", g_szAuthID[id]);
+    formatex(szData, 15, "%d", g_iTotalXP[id]);
+    nvault_set(g_vault_daily, szKey, szData);
+}
+
+public LoadXPFromVault(id) {
+    if(g_vault_daily == INVALID_HANDLE) return;
+    new szKey[64];
+    formatex(szKey, 63, "XP_%s", g_szAuthID[id]);
+    new iVal = nvault_get(g_vault_daily, szKey);
+    if(iVal > 0) g_iTotalXP[id] = iVal;
+}
+
+// --- LOGICA NVAULT DAILY ---
+public LoadDailyData(id) {
+    if(g_vault_daily == INVALID_HANDLE) return;
+    new szKey[64], szData[256], szDate[16];
+    formatex(szKey, 63, "D5_%s", g_szAuthID[id]);
+    get_time("%Y%m%d", szDate, 15);
+    
+    if(nvault_get(g_vault_daily, szKey, szData, 255)) {
+        new szSavedDate[16]; strtok(szData, szSavedDate, 15, szData, 255, ' '); 
+        if(!equal(szDate, szSavedDate)) { 
+            AssignDailyQuests(id); 
+        } 
+        else {
+            new szTemp[16];
+            for(new i=0; i<MAX_DAILY_SLOTS; i++) {
+                strtok(szData, szTemp, 15, szData, 255, ' '); g_iDailyQuests[id][i] = str_to_num(szTemp);
+                strtok(szData, szTemp, 15, szData, 255, ' '); g_iDailyProgress[id][i] = str_to_num(szTemp);
+                strtok(szData, szTemp, 15, szData, 255, ' '); g_bDailyCompleted[id][i] = (str_to_num(szTemp) == 1);
+            }
+        }
+    } else { 
+        AssignDailyQuests(id); 
+    }
+}
+
+public SaveDailyData(id) {
+    if(g_vault_daily == INVALID_HANDLE) return;
+    new szKey[64], szData[256], szDate[16];
+    formatex(szKey, 63, "D5_%s", g_szAuthID[id]);
+    get_time("%Y%m%d", szDate, 15);
+    new iLen = formatex(szData, 255, "%s", szDate);
+    for(new i=0; i<MAX_DAILY_SLOTS; i++) {
+        iLen += formatex(szData[iLen], 255-iLen, " %d %d %d", g_iDailyQuests[id][i], g_iDailyProgress[id][i], g_bDailyCompleted[id][i] ? 1 : 0);
+    }
+    nvault_set(g_vault_daily, szKey, szData);
+}
+
+// --- CREARE FORTATA ---
+public ForceCreateFile() {
+    new szFile[256];
+    get_configsdir(szFile, 255); add(szFile, 255, "/"); add(szFile, 255, RANKING_FILE);
+    
+    if(!file_exists(szFile)) {
+        new iFile = fopen(szFile, "wt");
+        if(iFile) {
+            fprintf(iFile, "; TOP XP QUESTS - Created Automatically^n");
+            fclose(iFile);
+            server_print("[QUEST] Fisierul .ini a fost creat cu succes!");
+        } else {
+            log_amx("[QUEST] EROARE: Nu pot crea fisierul .ini. Verifica permisiunile folderului configs!");
+        }
+    }
+}
+
+// --- SAVE TO FILE ---
+public SaveRankingsToFile() {
+    new szFile[256];
+    get_configsdir(szFile, 255); add(szFile, 255, "/"); add(szFile, 255, RANKING_FILE);
+    
+    const MAX_TRACKED = 500;
+    new T_Names[MAX_TRACKED][32], T_Auths[MAX_TRACKED][35], T_XP[MAX_TRACKED];
+    new iCount = 0;
+    
+    // 1. Citim existent
+    if(file_exists(szFile)) {
+        new iFile = fopen(szFile, "rt");
+        if(iFile) {
+            new szBuffer[256], szXP[10];
+            while(!feof(iFile) && iCount < MAX_TRACKED) {
+                fgets(iFile, szBuffer, 255);
+                if(szBuffer[0] == ';' || strlen(szBuffer) < 5) continue;
+                parse(szBuffer, T_Names[iCount], 31, T_Auths[iCount], 34, szXP, 9);
+                T_XP[iCount] = str_to_num(szXP);
+                iCount++;
+            }
+            fclose(iFile);
+        }
+    }
+    
+    // 2. Facem update cu userii online
+    new players[32], num, pid;
+    get_players(players, num);
+    for(new i=0; i<num; i++) {
+        pid = players[i];
+        if(g_iTotalXP[pid] == 0) continue;
+        
+        new bool:bFound = false;
+        for(new j=0; j<iCount; j++) {
+            if(equal(T_Auths[j], g_szAuthID[pid])) {
+                T_XP[j] = g_iTotalXP[pid]; // Update
+                copy(T_Names[j], 31, g_szPlayerName[pid]);
+                bFound = true;
+                break;
+            }
+        }
+        if(!bFound && iCount < MAX_TRACKED) {
+            copy(T_Names[iCount], 31, g_szPlayerName[pid]);
+            copy(T_Auths[iCount], 34, g_szAuthID[pid]);
+            T_XP[iCount] = g_iTotalXP[pid];
+            iCount++;
+        }
+    }
+    
+    // 3. Sortare
+    for(new i=0; i<iCount-1; i++) {
+        for(new j=i+1; j<iCount; j++) {
+            if(T_XP[j] > T_XP[i]) {
+                new iT=T_XP[i]; T_XP[i]=T_XP[j]; T_XP[j]=iT;
+                new sT[35];
+                copy(sT,31,T_Names[i]); copy(T_Names[i],31,T_Names[j]); copy(T_Names[j],31,sT);
+                copy(sT,34,T_Auths[i]); copy(T_Auths[i],34,T_Auths[j]); copy(T_Auths[j],34,sT);
+            }
+        }
+    }
+    
+    // 4. Scriere
+    new iFileWrite = fopen(szFile, "wt");
+    if(iFileWrite) {
+        fprintf(iFileWrite, "; TOP XP QUESTS - DO NOT EDIT MANUALLY^n");
+        for(new i=0; i<iCount; i++) {
+            fprintf(iFileWrite, "^"%s^" ^"%s^" ^"%d^"^n", T_Names[i], T_Auths[i], T_XP[i]);
+        }
+        fclose(iFileWrite);
+    }
+}
+
+// Helpers
+stock CheckMapType() {
+    new szMapName[6]; get_mapname(szMapName, 5);
+    if(containi(szMapName, "de_") != -1) g_bMapHasBomb = true;
+    if(containi(szMapName, "cs_") != -1) g_bMapHasHostage = true;
+}
+
+stock ChatColor(id, const msg[], any:...) {
+    new message[191];
+    vformat(message, 190, msg, 3);
+    static msg_saytext;
+    if (!msg_saytext) msg_saytext = get_user_msgid("SayText");
+    if (id) {
+        message_begin(MSG_ONE_UNRELIABLE, msg_saytext, _, id);
+        write_byte(id);
+        write_string(message);
+        message_end();
+    }
+}
