@@ -1,0 +1,95 @@
+#include <amxmodx>
+#include <fun>
+#include <cstrike>
+
+// AMXX 1.9+ are DHUD integrat, deci nu mai includem dhudmessage.inc
+// Stergem: #include <dhudmessage>
+
+#define PLUGIN "Most Wanted Player"
+#define VERSION "1.4"
+#define AUTHOR "Gemini"
+
+new g_kills[33]
+new g_most_wanted_id = 0
+new g_max_kills = 0
+new g_reward_amount = 0
+
+new p_mw_hud_enabled
+
+public plugin_init() {
+    register_plugin(PLUGIN, VERSION, AUTHOR)
+    
+    p_mw_hud_enabled = register_cvar("amx_mw_hud", "1")
+    
+    register_event("DeathMsg", "event_death", "a")
+    register_logevent("logevent_round_start", 2, "1=Round_Start")
+    register_logevent("logevent_round_end", 2, "1=Round_End")
+}
+
+public client_putinserver(id) {
+    g_kills[id] = 0
+}
+
+public event_death() {
+    new killer = read_data(1)
+    new victim = read_data(2)
+
+    if(killer != victim && is_user_connected(killer)) {
+        g_kills[killer]++
+        
+        if(victim == g_most_wanted_id) {
+            new name_killer[32], name_target[32]
+            get_user_name(killer, name_killer, 31)
+            get_user_name(victim, name_target, 31)
+
+            client_print_color(0, print_team_default, "^4[MW]^1 Felicitari! ^3%s^1 l-a eliminat pe ^3%s^1 si a primit ^4%d$^1!", name_killer, name_target, g_reward_amount)
+            
+            cs_set_user_money(killer, cs_get_user_money(killer) + g_reward_amount)
+            
+            set_user_rendering(victim, kRenderFxNone, 0, 0, 0, kRenderNormal, 0)
+            g_most_wanted_id = 0 
+        }
+    }
+}
+
+public logevent_round_end() {
+    g_max_kills = 0
+    new winner = 0
+
+    for(new i = 1; i <= get_maxplayers(); i++) {
+        if(is_user_connected(i) && g_kills[i] > g_max_kills) {
+            g_max_kills = g_kills[i]
+            winner = i
+        }
+    }
+
+    if(winner != 0 && g_max_kills > 0) {
+        g_most_wanted_id = winner
+        g_reward_amount = random_num(500, 1500)
+    } else {
+        g_most_wanted_id = 0
+    }
+
+    for(new i = 1; i <= 32; i++) g_kills[i] = 0
+}
+
+public logevent_round_start() {
+    if(g_most_wanted_id != 0 && is_user_alive(g_most_wanted_id)) {
+        new name[32]
+        get_user_name(g_most_wanted_id, name, 31)
+        
+        if(get_pcvar_num(p_mw_hud_enabled) == 1) {
+            set_hudmessage(255, 0, 0, -1.0, 0.2, 1, 6.0, 10.0)
+            show_hudmessage(0, "MOST WANTED: %s^nRecompensa: %d$", name, g_reward_amount)
+        }
+        
+        client_print_color(0, print_team_default, "^4[MW]^1 Tinta rundei este ^3%s^1. Recompensa: ^4%d$^1!", name, g_reward_amount)
+        
+        // DHUD in AMXX 1.9 foloseste aceleasi functii, doar ca sunt deja in core
+        set_dhudmessage(255, 0, 0, -1.0, 0.4, 2, 1.0, 8.0, 0.1, 1.5)
+        show_dhudmessage(g_most_wanted_id, "ESTI CEL MAI CAUTAT!^nSupravietuieste daca poti!")
+        
+        set_user_health(g_most_wanted_id, 125)
+        set_user_rendering(g_most_wanted_id, kRenderFxGlowShell, 255, 0, 0, kRenderNormal, 20)
+    }
+}
